@@ -122,6 +122,7 @@ static int config_insert(server *srv) {
 		{ "server.bsd-accept-filter",          NULL, T_CONFIG_STRING,  T_CONFIG_SCOPE_CONNECTION }, /* 75 */
 		{ "server.stream-request-body",        NULL, T_CONFIG_SHORT,   T_CONFIG_SCOPE_CONNECTION }, /* 76 */
 		{ "server.stream-response-body",       NULL, T_CONFIG_SHORT,   T_CONFIG_SCOPE_CONNECTION }, /* 77 */
+		{ "ssl.ca-crl-file",                   NULL, T_CONFIG_STRING,  T_CONFIG_SCOPE_CONNECTION }, /* 78 */
 
 		{ NULL,                                NULL, T_CONFIG_UNSET,   T_CONFIG_SCOPE_UNSET      }
 	};
@@ -222,6 +223,7 @@ static int config_insert(server *srv) {
 		s->ssl_verifyclient_depth = 9;
 		s->ssl_verifyclient_export_cert = 0;
 		s->ssl_disable_client_renegotiation = 1;
+		s->ssl_ca_crl_file = buffer_init();
 		s->listen_backlog = (0 == i ? 1024 : srv->config_storage[0]->listen_backlog);
 		s->stream_request_body = 0;
 		s->stream_response_body = 0;
@@ -290,6 +292,7 @@ static int config_insert(server *srv) {
 	      #endif
 		cv[76].destination = &(s->stream_request_body);
 		cv[77].destination = &(s->stream_response_body);
+		cv[78].destination = s->ssl_ca_crl_file;
 
 		srv->config_storage[i] = s;
 
@@ -473,6 +476,7 @@ int config_setup_connection(server *srv, connection *con) {
 	PATCH(ssl_verifyclient_username);
 	PATCH(ssl_verifyclient_export_cert);
 	PATCH(ssl_disable_client_renegotiation);
+	PATCH(ssl_ca_crl_file);
 
 	return 0;
 }
@@ -601,6 +605,8 @@ int config_patch_connection(server *srv, connection *con) {
 				PATCH(ssl_verifyclient_export_cert);
 			} else if (buffer_is_equal_string(du->key, CONST_STR_LEN("ssl.disable-client-renegotiation"))) {
 				PATCH(ssl_disable_client_renegotiation);
+			} else if (buffer_is_equal_string(du->key, CONST_STR_LEN("ssl.ca-crl-file"))) {
+				PATCH(ssl_ca_crl_file);
 			}
 		}
 	}

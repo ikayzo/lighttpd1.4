@@ -40,12 +40,80 @@
 #endif
 
 #ifdef USE_OPENSSL
+typedef struct {
+	server *srv;
+	buffer *ssl_ca_file;
+	buffer *ssl_ca_crl_file;
+} ssl_ctx_data;
+
+static int ssl_verifyclient_callback(int preverify_ok, X509_STORE_CTX *ctx) {
+	int ret = preverify_ok;
+
+	if ((0 == X509_STORE_CTX_get_error_depth(ctx)) && ret) {
+		SSL *ssl = X509_STORE_CTX_get_ex_data(ctx, SSL_get_ex_data_X509_STORE_CTX_idx());
+		STACK_OF(X509_NAME) *trusted = SSL_get_client_CA_list(ssl);
+		X509_NAME *issuer = X509_get_issuer_name(ctx->cert);
+
+		ret = 0;
+		for (int i = 0; i < sk_X509_NAME_num(trusted); i++) {
+			if (0 == X509_NAME_cmp(issuer, sk_X509_NAME_value(trusted, i))) {
+				ret = 1;
+				break;
+			}
+		}
+		if (!ret) {
+			X509_STORE_CTX_set_error(ctx, X509_V_ERR_APPLICATION_VERIFICATION);
+		}
+	}
+
+	return ret;
+}
+
+static int ssl_load_trust_store(SSL_CTX *ctx)
+{
+	ssl_ctx_data *d = SSL_CTX_get_app_data(ctx);
+
+	if ((d != NULL) && (!buffer_is_empty(d->ssl_ca_file))) {
+		X509_STORE *store = X509_STORE_new();
+		if (1 != X509_STORE_load_locations(store, d->ssl_ca_file->ptr, NULL)) {
+			log_error_write(d->srv, __FILE__, __LINE__, "ssb", "SSL:",
+			ERR_error_string(ERR_get_error(), NULL), d->ssl_ca_file);
+			return -1;
+		}
+		STACK_OF(X509_NAME) *certs = SSL_load_client_CA_file(d->ssl_ca_file->ptr);
+		if (!certs) {
+			log_error_write(d->srv, __FILE__, __LINE__, "ssb", "SSL:",
+			ERR_error_string(ERR_get_error(), NULL), d->ssl_ca_file);
+			return -1;
+		}
+		SSL_CTX_set_client_CA_list(ctx, certs);
+		if (!buffer_is_empty(d->ssl_ca_crl_file)) {
+			if (1 != X509_STORE_load_locations(store, d->ssl_ca_crl_file->ptr, NULL)) {
+				log_error_write(d->srv, __FILE__, __LINE__, "ssb", "SSL:",
+				ERR_error_string(ERR_get_error(), NULL), d->ssl_ca_crl_file);
+				return -1;
+			}
+			X509_STORE_set_flags(store, X509_V_FLAG_CRL_CHECK);
+		}
+		SSL_CTX_set_cert_store(ctx, store);
+	}
+
+	return 0;
+}
+
 static void ssl_info_callback(const SSL *ssl, int where, int ret) {
 	UNUSED(ret);
 
 	if (0 != (where & SSL_CB_HANDSHAKE_START)) {
 		connection *con = SSL_get_app_data(ssl);
 		++con->renegotiations;
+
+		SSL_CTX *ctx = SSL_get_SSL_CTX(ssl);
+
+		if (0 != ssl_load_trust_store(ctx)) {
+			ssl_ctx_data *d = SSL_CTX_get_app_data(ctx);
+			connection_set_state(d->srv, con, CON_STATE_ERROR);
+		}
 	}
 }
 #endif
@@ -795,20 +863,23 @@ int network_init(server *srv) {
 		}
 
 
-		if (!buffer_string_is_empty(s->ssl_ca_file)) {
-			s->ssl_ca_file_cert_names = SSL_load_client_CA_file(s->ssl_ca_file->ptr);
-			if (NULL == s->ssl_ca_file_cert_names) {
-				log_error_write(srv, __FILE__, __LINE__, "ssb", "SSL:",
-						ERR_error_string(ERR_get_error(), NULL), s->ssl_ca_file);
-			}
-		}
-
 		if (buffer_string_is_empty(s->ssl_pemfile) || !s->ssl_enabled) continue;
 
-		if (NULL == (s->ssl_ctx = SSL_CTX_new(SSLv23_server_method()))) {
+		if (NULL == (s->ssl_ctx = SSL_CTX_new(TLSv1_2_server_method()))) {
 			log_error_write(srv, __FILE__, __LINE__, "ss", "SSL:",
 					ERR_error_string(ERR_get_error(), NULL));
 			return -1;
+		}
+
+		if (!buffer_string_is_empty(s->ssl_ca_file)) {
+			ssl_ctx_data *d = SSL_CTX_get_app_data(s->ssl_ctx);
+			if (NULL == d) {
+				d = malloc(sizeof(*d));
+				SSL_CTX_set_app_data(s->ssl_ctx, d);
+			}
+			d->srv = srv;
+			d->ssl_ca_file = s->ssl_ca_file;
+			d->ssl_ca_crl_file = s->ssl_ca_crl_file;
 		}
 
 		/* completely useless identifier; required for client cert verification to work with sessions */
@@ -937,6 +1008,7 @@ int network_init(server *srv) {
 #endif
 #endif
 
+#if 0 // SCV: Don't really care about SNI
 		/* load all ssl.ca-files specified in the config into each SSL_CTX to be prepared for SNI */
 		for (j = 0; j < srv->config_context->used; j++) {
 			specific_config *s1 = srv->config_storage[j];
@@ -949,19 +1021,19 @@ int network_init(server *srv) {
 				}
 			}
 		}
+#endif
 
 		if (s->ssl_verifyclient) {
-			if (NULL == s->ssl_ca_file_cert_names) {
+			if (buffer_is_empty(s->ssl_ca_file)) {
 				log_error_write(srv, __FILE__, __LINE__, "s",
 					"SSL: You specified ssl.verifyclient.activate but no ca_file"
 				);
 				return -1;
 			}
-			SSL_CTX_set_client_CA_list(s->ssl_ctx, SSL_dup_CA_list(s->ssl_ca_file_cert_names));
 			SSL_CTX_set_verify(
 				s->ssl_ctx,
 				SSL_VERIFY_PEER | (s->ssl_verifyclient_enforce ? SSL_VERIFY_FAIL_IF_NO_PEER_CERT : 0),
-				NULL
+				(s->ssl_verifyclient_enforce ? ssl_verifyclient_callback : NULL)
 			);
 			SSL_CTX_set_verify_depth(s->ssl_ctx, s->ssl_verifyclient_depth);
 		}

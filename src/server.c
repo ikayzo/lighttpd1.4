@@ -348,6 +348,7 @@ static void server_free(server *srv) {
 			buffer_free(s->server_tag);
 			buffer_free(s->ssl_pemfile);
 			buffer_free(s->ssl_ca_file);
+			buffer_free(s->ssl_ca_crl_file);
 			buffer_free(s->ssl_cipher_list);
 			buffer_free(s->ssl_dh_file);
 			buffer_free(s->ssl_ec_curve);
@@ -357,7 +358,10 @@ static void server_free(server *srv) {
 			array_free(s->mimetypes);
 			buffer_free(s->ssl_verifyclient_username);
 #ifdef USE_OPENSSL
-			SSL_CTX_free(s->ssl_ctx);
+			if (s->ssl_ctx) {
+				free(SSL_CTX_get_app_data(s->ssl_ctx));
+				SSL_CTX_free(s->ssl_ctx);
+			}
 			EVP_PKEY_free(s->ssl_pemfile_pkey);
 			X509_free(s->ssl_pemfile_x509);
 			if (NULL != s->ssl_ca_file_cert_names) sk_X509_NAME_pop_free(s->ssl_ca_file_cert_names, X509_NAME_free);
